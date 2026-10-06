@@ -1,0 +1,324 @@
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "entradas.h"
+
+uint8_t salidas[4][4] =
+    {
+        {A3, A2, A1, A0},
+        {B3, B2, B1, B0},
+        {C3, C2, C1, C0},
+        {D3, D2, D1, D0}};
+
+uint8_t pulsadores[4] = {P1, P2, P3, P4};
+
+void mostrarNum(uint8_t display, uint8_t num)
+{
+    if (num > 9)
+    {
+        num = 0xF;
+    }
+    for (int i = 0; i < 4; i++)
+    {
+        gpio_put(salidas[display][i], (num >> i) & 1);
+    }
+}
+
+void initPulsadores()
+{
+    for (int i = 0; i < 4; i++)
+    {
+        gpio_init(pulsadores[i]);
+        gpio_set_dir(pulsadores[i], GPIO_IN);
+        gpio_pull_up(pulsadores[i]);
+    }
+}
+
+void initSalidas()
+{
+    for (int i = 0; i < 4; i++)
+    {
+        for (int j = 0; j < 4; j++)
+        {
+            gpio_init(salidas[i][j]);
+            gpio_set_dir(salidas[i][j], GPIO_OUT);
+            gpio_put(salidas[i][j], 0); // Inicializar en bajo
+        }
+    }
+}
+
+int8_t leerPulsador(uint8_t pulsador)
+{
+    return !gpio_get(pulsadores[pulsador]);
+}
+
+void initLed()
+{
+    gpio_init(LED);
+    gpio_set_dir(LED, GPIO_OUT);
+    gpio_put(LED, 0); // Inicializar en bajo
+}
+
+uint32_t cuenta_seg = 43385;
+uint32_t ajuste_seg = 0;
+uint32_t alarma_seg = 0;
+
+void mostrarTiempo(uint32_t segundos)
+{
+    uint32_t horas = segundos / 3600;
+    uint32_t minutos = (segundos % 3600) / 60;
+    segundos = segundos % 60;
+
+    mostrarNum(3, horas / 10);
+    mostrarNum(2, horas % 10);
+    mostrarNum(0, minutos / 10);
+    mostrarNum(1, minutos % 10);
+}
+
+void prenderBuzzer()
+{
+    gpio_put(BUZZER, 1); // Encender buzzer
+}
+
+void apagarBuzzer()
+{
+    gpio_put(BUZZER, 0); // Apagar buzzer
+}
+
+void apagarNumeros()
+{
+    for (int i = 0; i < 4; i++)
+    {
+        mostrarNum(i, 0xF); // Mostrar nada (apagado)
+    }
+}
+
+struct
+{
+    uint32_t lastDebounceTime;
+    uint32_t debounceDelay;
+    bool lastButtonState;
+    bool buttonState;
+    uint32_t buttonPressTime;
+    bool buttonPressed;
+} buttonStates[4] = {
+    {0, 50, false, false, 0, false},
+    {0, 50, false, false, 0, false},
+    {0, 50, false, false, 0, false},
+    {0, 50, false, false, 0, false}};
+
+void updateButtonState(uint8_t buttonIndex)
+{
+    bool reading = leerPulsador(buttonIndex);
+    uint32_t currentTime = time_us_32() / 1000; // Convertir a milisegundos
+
+    if (reading != buttonStates[buttonIndex].lastButtonState)
+    {
+        buttonStates[buttonIndex].lastDebounceTime = currentTime;
+    }
+
+    if ((currentTime - buttonStates[buttonIndex].lastDebounceTime) > buttonStates[buttonIndex].debounceDelay)
+    {
+        if (reading != buttonStates[buttonIndex].buttonState)
+        {
+            buttonStates[buttonIndex].buttonState = reading;
+
+            if (buttonStates[buttonIndex].buttonState == true)
+            {
+                printf("Pulsador %d presionado.", buttonIndex);
+                buttonStates[buttonIndex].buttonPressed = true;
+                buttonStates[buttonIndex].buttonPressTime = currentTime;
+            }
+        }
+    }
+
+    buttonStates[buttonIndex].lastButtonState = reading;
+}
+
+int main()
+{
+    stdio_init_all();
+    initPulsadores();
+    initSalidas();
+    initLed();
+
+
+
+    uint32_t cuenta = 0, cuenta_ms = 0;
+    uint8_t modo = 0;
+    uint8_t alarmaDisparada = 1;
+    uint8_t alarmaSonando = 0;
+
+    while (true)
+    {
+        cuenta_ms = time_us_32() / 1000; // Convertir a milisegundos
+        if ((time_us_32() / 1000000) != cuenta)
+        {
+            cuenta = time_us_32() / 1000000;
+            cuenta_seg++;
+            if(cuenta_seg >= 86400) // Si supera las 24 horas, reiniciar a 0
+            {
+                cuenta_seg = cuenta_seg % 86400;
+                alarmaDisparada = 0; // Reiniciar alarma disparada al reiniciar el tiempo
+            }
+            if (cuenta_seg == alarma_seg && alarmaDisparada == 0)
+            {
+                printf("ALARMA ACTIVADA\n");
+                alarmaDisparada = 1; // Marcar que la alarma ha sido disparada
+                alarmaSonando = 1; // Marcar que la alarma está sonando
+            }
+
+            if (alarmaSonando == 1)
+            {
+                prenderBuzzer();
+            }
+            else
+            {
+                apagarBuzzer();
+            }
+        }
+
+        switch (modo)
+        {
+        case 0: // Mostrar tiempo
+            mostrarTiempo(cuenta_seg);
+            if (cuenta_seg % 2 == 0)
+            {
+                gpio_put(LED, 1); // Encender LED
+            }
+            else
+            {
+                gpio_put(LED, 0); // Apagar LED
+            }
+
+            for (uint8_t i = 0; i < 4; i++)
+            {
+                updateButtonState(i);
+
+                if (buttonStates[i].buttonState == true && buttonStates[i].buttonPressed == true)
+                {
+                    uint32_t currentTime = time_us_32() / 1000; // Convertir a milisegundos
+                    uint32_t pressDuration = currentTime - buttonStates[i].buttonPressTime;
+
+                    if (i == PULSADOR_AJUSTE && pressDuration >= 2000)
+                    {
+                        modo = 1; // Cambiar modo
+                        ajuste_seg = cuenta_seg; // Guardar el tiempo actual para ajuste
+                        buttonStates[i].buttonPressed = false;
+                        printf("Modo de ajuste activado\n");
+                    }
+                    if (i == PULSADOR_ALARMA && pressDuration >= 2000)
+                    {
+                        modo = 2; // Cambiar modo
+                        alarma_seg = cuenta_seg; // Guardar el tiempo actual para ajuste
+                        buttonStates[i].buttonPressed = false;
+                        printf("Modo de alarma activado\n");
+                    }
+                    if (i == PULSADOR_ALARMA && pressDuration >= 1000 && pressDuration < 2000)
+                    {
+                        alarmaDisparada = 0;
+                        alarmaSonando = 0;
+                    }
+
+                }
+            }
+
+            break;
+
+        case 1: // Ajuste minutos + segundos
+            if ((cuenta_ms/250) % 2 == 0)
+            {
+                gpio_put(LED, 1); // Encender LED
+            }
+            else
+            {
+                gpio_put(LED, 0); // Apagar LED
+            }
+            mostrarTiempo(ajuste_seg);
+            for (uint8_t i = 0; i < 4; i++)
+            {
+                updateButtonState(i);
+
+                uint32_t currentTime = time_us_32() / 1000; // Convertir a milisegundos
+                uint32_t pressDuration = currentTime - buttonStates[i].buttonPressTime;
+
+                if (buttonStates[i].buttonState == true && buttonStates[i].buttonPressed == true)
+                {
+                    if (i == 0 && pressDuration >= 2000)
+                    {
+                        modo = 0; // Cambiar modo
+                        cuenta_seg = ajuste_seg; // Guardar el tiempo ajustado
+                        buttonStates[i].buttonPressed = false;
+                        printf("Modo de ajuste desactivado\n");
+                    }
+                    if (i == 1)
+                    {
+                        buttonStates[i].buttonPressed = false;
+                        ajuste_seg += 3600; // Incrementar horas
+                        if(ajuste_seg >= 86400) // Si supera las 24 horas, reiniciar a 0
+                        {
+                            ajuste_seg = ajuste_seg % 86400;
+                        }
+                    }
+                    if (i == 2)
+                    {
+                        buttonStates[i].buttonPressed = false;
+                        ajuste_seg += 60; // Incrementar minutos
+                        if(ajuste_seg >= 86400) // Si supera las 24 horas, reiniciar a 0
+                        {
+                            ajuste_seg = ajuste_seg % 86400;
+                        }
+                    }
+                }
+            }
+            break;
+        case 2: // Alarma minutos + segundos
+            if ((cuenta_ms/100) % 2 == 0)
+            {
+                gpio_put(LED, 1); // Encender LED
+            }
+            else
+            {
+                gpio_put(LED, 0); // Apagar LED
+            }
+            mostrarTiempo(alarma_seg);
+            for (uint8_t i = 0; i < 4; i++)
+            {
+                updateButtonState(i);
+
+                uint32_t currentTime = time_us_32() / 1000; // Convertir a milisegundos
+                uint32_t pressDuration = currentTime - buttonStates[i].buttonPressTime;
+
+                if (buttonStates[i].buttonState == true && buttonStates[i].buttonPressed == true)
+                {
+                    if (i == 0 && pressDuration >= 2000)
+                    {
+                        modo = 0; // Cambiar modo
+                        cuenta_seg = alarma_seg; // Guardar el tiempo de alarma
+                        alarmaDisparada = 0; // Reiniciar alarma disparada al salir del modo de alarma
+                        buttonStates[i].buttonPressed = false;
+                        printf("Modo de alarma desactivado\n");
+                    }
+                    if (i == 1)
+                    {
+                        buttonStates[i].buttonPressed = false;
+                        alarma_seg += 3600; // Incrementar horas
+                        if(alarma_seg >= 86400) // Si supera las 24 horas, reiniciar a 0
+                        {
+                            alarma_seg = alarma_seg % 86400;
+                        }
+                    }
+                    if (i == 2)
+                    {
+                        buttonStates[i].buttonPressed = false;
+                        alarma_seg += 60; // Incrementar minutos
+                        if(alarma_seg >= 86400) // Si supera las 24 horas, reiniciar a 0
+                        {
+                            alarma_seg = alarma_seg % 86400;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+}
